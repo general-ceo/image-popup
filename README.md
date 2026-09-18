@@ -1,7 +1,7 @@
 # Menu Bar Image Flash
 
-A macOS menu bar app. Click the icon and a random image flashes on screen for one
-second, then disappears on its own. Group your images into folders and pick which
+A macOS menu bar app. Click the icon and a random picture, GIF, or video flashes on
+screen, then disappears on its own. Group your files into folders and pick which
 folder to draw from — right from the menu bar.
 
 There's no Dock icon and no app window; it lives entirely in the menu bar.
@@ -19,7 +19,7 @@ python3 -m venv .venv
 A small photo icon appears in your menu bar. The repo ships with two empty example
 folders, so your first stop is adding some images — see below.
 
-**Requires macOS** (it's built on AppKit) and Python 3.8+.
+**Requires macOS** (it's built on AppKit and AVFoundation) and Python 3.8+.
 
 ## Adding your own image folders
 
@@ -41,7 +41,16 @@ the whole setup — there is no config file and no code to edit.
 3. Right-click the menu bar icon. **Cats** is now listed under **Collection** —
    no restart needed. Click it to make it active.
 
-Supported file types: `.png` `.jpg` `.jpeg` `.gif` `.tiff` `.bmp` `.heic` `.webp`.
+Supported file types:
+
+| Kind | Extensions | How long it stays up |
+| --- | --- | --- |
+| Images | `.png` `.jpg` `.jpeg` `.tiff` `.bmp` `.heic` `.webp` | `DISPLAY_SECONDS` (1 second) |
+| Animated GIFs | `.gif` | one full loop |
+| Videos | `.mp4` `.mov` `.m4v` | until the clip ends |
+
+A non-animated GIF is treated as a still image. Mix all three kinds in the same
+folder — each file brings its own timing.
 
 A folder layout like this:
 
@@ -75,8 +84,8 @@ Quit
 
 - **The menu re-reads `images/` every time you open it**, so folders you add, rename,
   or delete show up immediately — the app keeps running.
-- **Images are re-scanned on every click**, so you can drop a new picture in and see
-  it right away.
+- **Files are re-scanned on every click**, so you can drop a new one in and see it
+  right away.
 - **Folder names sort alphabetically**, ignoring case. Spaces are fine.
 - **Folders starting with `.` are ignored**, as are loose files sitting directly in
   `images/` — only subfolders become collections.
@@ -109,17 +118,36 @@ Dock — with a `SCREEN_MARGIN` gap from every edge, so an image is never clippe
 hidden behind the Dock. If an image is too big for the screen to spare that margin,
 the margin shrinks rather than pinning the window to one spot.
 
+## GIFs and videos
+
+**Animated GIFs** play once. The app adds up the frame delays stored in the file and
+keeps the popup open for exactly that long, so the loop finishes instead of getting
+cut off at one second. Frames that ask for ~0 delay are shown at
+`MIN_GIF_FRAME_DELAY`, which is what browsers do too.
+
+**Videos** play from start to finish and the popup closes on the last frame. Portrait
+clips from a phone are sized using the file's rotation metadata, so they aren't shown
+sideways. Videos play **with sound** — set `MUTE_VIDEO = True` in `menubar_flash.py`
+to silence them.
+
+Anything longer than `MAX_MEDIA_SECONDS` (30s) is cut off there, so one long clip
+can't hold the screen. A file that can't be decoded shows a placeholder instead of
+failing silently.
+
+Clicking the icon during playback stops the current clip and starts a new one.
+
 ## Popup behavior
 
 The window is borderless with rounded corners and floats above other windows. It
 ignores mouse events, so clicks pass straight through to whatever is underneath, and
 it never takes keyboard focus — you can keep typing while it's on screen.
 
-Images scale proportionally into a 500pt box, so aspect ratio is preserved and large
-photos don't swallow the screen. Sizes snap to whole even points to stay aligned with
+Images and videos scale proportionally into a 500pt box, so aspect ratio is preserved
+and large files don't swallow the screen. Sizes snap to whole even points to stay aligned with
 Retina displays, which keeps edges crisp.
 
-Clicking the icon again while an image is up swaps in a new one and restarts the timer.
+Clicking the icon again while something is up swaps in a new file and restarts the
+timer.
 
 ## Tuning
 
@@ -127,10 +155,13 @@ Constants at the top of `menubar_flash.py`:
 
 | Constant | Default | Meaning |
 | --- | --- | --- |
-| `DISPLAY_SECONDS` | `1.0` | How long the image stays up |
+| `DISPLAY_SECONDS` | `1.0` | How long a still image stays up |
 | `MAX_EDGE` | `500.0` | Longest side of the popup, in points |
 | `CORNER_RADIUS` | `14.0` | Popup corner rounding |
 | `SCREEN_MARGIN` | `5.0` | Minimum gap from screen edges in random mode |
+| `MAX_MEDIA_SECONDS` | `30.0` | Hard cap on GIF loops and video length |
+| `MUTE_VIDEO` | `False` | Set `True` to play videos silently |
+| `MIN_GIF_FRAME_DELAY` | `0.1` | Rate used for GIF frames with ~0 delay |
 | `IMAGE_DIR` | `images/` | Where collection folders are read from |
 
 ## Committing your images
@@ -152,9 +183,12 @@ out of it.
 ./.venv/bin/python test_menubar_flash.py
 ```
 
-70 checks, run against a temporary `images/` folder in `/tmp` — they don't touch your
-pictures, and they save and restore your menu settings. Covers folder auto-detection
-(sorting, hidden folders, loose files, adding and deleting folders while running),
-collection switching and isolation, click handling, the one-second dismissal, rapid
-re-clicks, randomness, window geometry, the Random Position toggle, and every empty
-state.
+97 checks, run against a temporary `images/` folder — they don't touch your files, and
+they save and restore your menu settings. The suite generates its own animated GIF and
+H.264 clip on the fly, so it needs no fixtures checked into the repo.
+
+Covers folder auto-detection (sorting, hidden folders, loose files, adding and deleting
+folders while running), collection switching and isolation, per-format timing (still vs.
+GIF loop vs. video length), video playback and teardown, the duration cap, corrupt-file
+fallback, click handling, rapid re-clicks, randomness, window geometry, the Random
+Position toggle, and every empty state.

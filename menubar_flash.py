@@ -6,12 +6,22 @@ import random
 import sys
 
 import objc
+from AVFoundation import (
+    AVLayerVideoGravityResizeAspect,
+    AVMediaTypeVideo,
+    AVPlayer,
+    AVPlayerItemDidPlayToEndTimeNotification,
+    AVPlayerLayer,
+    AVURLAsset,
+)
+from CoreMedia import CMTimeGetSeconds
 from AppKit import (
     NSApp,
     NSApplication,
     NSApplicationActivationPolicyAccessory,
     NSBackingStoreBuffered,
     NSBezierPath,
+    NSBitmapImageRep,
     NSBorderlessWindowMask,
     NSCenterTextAlignment,
     NSColor,
@@ -22,6 +32,9 @@ from AppKit import (
     NSEventTypeRightMouseUp,
     NSFont,
     NSImage,
+    NSImageCurrentFrame,
+    NSImageCurrentFrameDuration,
+    NSImageFrameCount,
     NSImageScaleProportionallyUpOrDown,
     NSImageView,
     NSMakeRect,
@@ -39,7 +52,7 @@ from AppKit import (
     NSWindowCollectionBehaviorCanJoinAllSpaces,
     NSWindowCollectionBehaviorStationary,
 )
-from Foundation import NSObject, NSUserDefaults
+from Foundation import NSNotificationCenter, NSObject, NSURL, NSUserDefaults
 
 # --- Configuration -----------------------------------------------------------
 
@@ -52,6 +65,12 @@ SCREEN_MARGIN = 5.0  # keep random placements this far from the screen edges
 RANDOM_POSITION_KEY = "RandomPosition"  # NSUserDefaults key, so the toggle survives a restart
 COLLECTION_KEY = "Collection"
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".tiff", ".tif", ".bmp", ".heic", ".webp"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v"}
+MEDIA_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
+MUTE_VIDEO = False  # videos play with sound; set True to silence them
+MAX_MEDIA_SECONDS = 30.0  # safety cap, so one long clip can't hold the screen
+PLACEHOLDER_SIZE = (340.0, 120.0)
+MIN_GIF_FRAME_DELAY = 0.1  # GIFs asking for ~0s per frame are shown at this rate
 
 
 def find_collections():
@@ -73,16 +92,62 @@ def collection_dir(collection):
     return os.path.join(IMAGE_DIR, collection)
 
 
-def find_images(collection):
-    """Return sorted paths of every usable image in the given collection's folder."""
+def find_media(collection):
+    """Return sorted paths of every playable image or video in a collection."""
     folder = collection_dir(collection)
     if not os.path.isdir(folder):
         return []
     return sorted(
         os.path.join(folder, name)
         for name in os.listdir(folder)
-        if not name.startswith(".") and os.path.splitext(name)[1].lower() in IMAGE_EXTENSIONS
+        if not name.startswith(".") and os.path.splitext(name)[1].lower() in MEDIA_EXTENSIONS
     )
+
+
+def is_video(path):
+    return os.path.splitext(path)[1].lower() in VIDEO_EXTENSIONS
+
+
+def gif_loop_duration(image):
+    """Seconds for one pass through an animated image, or None if it isn't animated.
+
+    Frames asking for ~0s are clamped to MIN_GIF_FRAME_DELAY, matching how browsers
+    and AppKit actually render them, so we never dismiss mid-loop.
+    """
+    for rep in image.representations():
+        if not isinstance(rep, NSBitmapImageRep):
+            continue
+        frames = rep.valueForProperty_(NSImageFrameCount)
+        if not frames or int(frames) < 2:
+            continue
+        total = 0.0
+        for index in range(int(frames)):
+            rep.setProperty_withValue_(NSImageCurrentFrame, index)
+            delay = rep.valueForProperty_(NSImageCurrentFrameDuration)
+            delay = float(delay) if delay else 0.0
+            total += delay if delay >= 0.02 else MIN_GIF_FRAME_DELAY
+        rep.setProperty_withValue_(NSImageCurrentFrame, 0)  # start playback at frame 1
+        return total
+    return None
+
+
+def video_info(path):
+    """(duration_seconds, (width, height)) for a video, or None if unreadable."""
+    asset = AVURLAsset.URLAssetWithURL_options_(NSURL.fileURLWithPath_(path), None)
+    tracks = asset.tracksWithMediaType_(AVMediaTypeVideo)
+    if not tracks:
+        return None
+    duration = CMTimeGetSeconds(asset.duration())
+    if duration != duration or duration <= 0:  # NaN or empty
+        return None
+    size = tracks[0].naturalSize()
+    t = tracks[0].preferredTransform()
+    # Respect rotation metadata, so portrait clips from a phone aren't sized sideways.
+    width = abs(size.width * t.a + size.height * t.c)
+    height = abs(size.width * t.b + size.height * t.d)
+    if width <= 0 or height <= 0:
+        width, height = size.width, size.height
+    return duration, (width, height)
 
 
 class RoundedView(NSView):
@@ -102,6 +167,7 @@ class FlashController(NSObject):
             return None
         self.window = None
         self.timer = None
+        self.player = None
         self.last_image = None
         defaults = NSUserDefaults.standardUserDefaults()
         self.random_position = defaults.boolForKey_(RANDOM_POSITION_KEY)
@@ -170,9 +236,9 @@ class FlashController(NSObject):
                     name, "selectCollection:", ""
                 )
                 item.setTarget_(self)
-                count = len(find_images(name))
+                count = len(find_media(name))
                 item.setToolTip_(
-                    "%d image%s in images/%s" % (count, "" if count == 1 else "s", name)
+                    "%d file%s in images/%s" % (count, "" if count == 1 else "s", name)
                 )
                 self.menu.addItem_(item)
                 self.collection_items[name] = item
@@ -276,32 +342,57 @@ class FlashController(NSObject):
     def showImage_(self, sender):
         self.dismissWindow()  # a second click restarts the flash cleanly
 
-        image = self.pickImage()
-        self.window = self.makeWindow(image)
+        path = self.pickMedia()
+        self.window, duration = self.makeWindow(path)
         self.window.orderFrontRegardless()  # show without stealing keyboard focus
 
+        # A video also dismisses itself on AVPlayerItemDidPlayToEndTimeNotification;
+        # this timer is the backstop if that notification never arrives.
         self.timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            DISPLAY_SECONDS, self, "timerFired:", None, False
+            duration, self, "timerFired:", None, False
         )
 
     @objc.python_method
-    def pickImage(self):
-        """Random image from the active collection, avoiding an immediate repeat."""
+    def pickMedia(self):
+        """Random image or video from the active collection, never repeating twice."""
         self.refreshCollections()  # a folder may have appeared or vanished since last time
         if self.collection is None:
             return None
-        images = find_images(self.collection)
-        if not images:
+        media = find_media(self.collection)
+        if not media:
             return None
-        candidates = [p for p in images if p != self.last_image] or images
+        candidates = [p for p in media if p != self.last_image] or media
         self.last_image = random.choice(candidates)
-        return NSImage.alloc().initWithContentsOfFile_(self.last_image)
+        return self.last_image
 
     # --- window lifecycle ---
 
     @objc.python_method
-    def makeWindow(self, image):
-        width, height = self.contentSize(image)
+    def makeWindow(self, path):
+        """Build the popup for one file. Returns (window, seconds to keep it up)."""
+        image = None
+        duration = DISPLAY_SECONDS
+        video = None
+
+        if path is None:
+            source = PLACEHOLDER_SIZE
+        elif is_video(path):
+            video = video_info(path)
+            if video is None:  # unreadable or not really a video
+                source = PLACEHOLDER_SIZE
+            else:
+                duration, source = min(video[0], MAX_MEDIA_SECONDS), video[1]
+        else:
+            image = NSImage.alloc().initWithContentsOfFile_(path)
+            if image is None:
+                source = PLACEHOLDER_SIZE
+            else:
+                source = tuple(image.size())
+                loop = gif_loop_duration(image)
+                if loop:
+                    duration = min(loop, MAX_MEDIA_SECONDS)
+
+        width, height = self.contentSize(source)
         x, y = self.windowOrigin(width, height)
         frame = NSMakeRect(x, y, width, height)
 
@@ -328,16 +419,41 @@ class FlashController(NSObject):
         container.layer().setMasksToBounds_(True)
         window.setContentView_(container)
 
-        if image is None:
-            container.addSubview_(self.makePlaceholder(width, height))
-        else:
+        if video is not None:
+            self.attachPlayer(container, path, width, height)
+        elif image is not None:
             view = NSImageView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
             view.setImage_(image)
             view.setImageScaling_(NSImageScaleProportionallyUpOrDown)
             view.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
+            view.setAnimates_(True)  # animated GIFs play; static images ignore this
             container.addSubview_(view)
+        else:
+            container.addSubview_(self.makePlaceholder(width, height))
 
-        return window
+        return window, duration
+
+    @objc.python_method
+    def attachPlayer(self, container, path, width, height):
+        """Start a video playing inside the popup, dismissing when it ends."""
+        self.player = AVPlayer.playerWithURL_(NSURL.fileURLWithPath_(path))
+        self.player.setMuted_(MUTE_VIDEO)
+
+        layer = AVPlayerLayer.playerLayerWithPlayer_(self.player)
+        layer.setFrame_(NSMakeRect(0, 0, width, height))
+        layer.setVideoGravity_(AVLayerVideoGravityResizeAspect)
+        layer.setCornerRadius_(CORNER_RADIUS)
+        layer.setMasksToBounds_(True)
+        container.layer().addSublayer_(layer)
+
+        NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
+            self, "videoEnded:", AVPlayerItemDidPlayToEndTimeNotification,
+            self.player.currentItem(),
+        )
+        self.player.play()
+
+    def videoEnded_(self, notification):
+        self.dismissWindow()
 
     @objc.python_method
     def windowOrigin(self, width, height):
@@ -370,20 +486,19 @@ class FlashController(NSObject):
         )
 
     @objc.python_method
-    def contentSize(self, image):
-        if image is None:
-            return 340.0, 120.0
-        size = image.size()
-        if size.width <= 0 or size.height <= 0:
-            return 340.0, 120.0
-        scale = min(MAX_EDGE / size.width, MAX_EDGE / size.height)
+    def contentSize(self, source_size):
+        """Fit a (width, height) into the popup's box, preserving aspect ratio."""
+        width, height = source_size
+        if width <= 0 or height <= 0:
+            return PLACEHOLDER_SIZE
+        scale = min(MAX_EDGE / width, MAX_EDGE / height)
 
         def snap(value):
             # Round to an even number of points and never exceed the cap, so the
             # window keeps the size we asked for on Retina displays.
             return max(2.0, min(MAX_EDGE, 2.0 * round(value * scale / 2.0)))
 
-        return snap(size.width), snap(size.height)
+        return snap(width), snap(height)
 
     @objc.python_method
     def makePlaceholder(self, width, height):
@@ -391,9 +506,10 @@ class FlashController(NSObject):
             NSMakeRect(20, height / 2 - 30, width - 40, 60)
         )
         label.setStringValue_(
-            "No images in %s.\nAdd some to images/%s/." % (self.collection, self.collection)
+            "Nothing in %s.\nAdd images or videos to images/%s/."
+            % (self.collection, self.collection)
             if self.collection
-            else "No image folders yet.\nCreate one inside images/ and add pictures."
+            else "No folders yet.\nCreate one inside images/ and add some files."
         )
         label.setAlignment_(NSCenterTextAlignment)
         label.setFont_(NSFont.systemFontOfSize_(13))
@@ -408,6 +524,12 @@ class FlashController(NSObject):
 
     @objc.python_method
     def dismissWindow(self):
+        if self.player is not None:
+            NSNotificationCenter.defaultCenter().removeObserver_name_object_(
+                self, AVPlayerItemDidPlayToEndTimeNotification, None
+            )
+            self.player.pause()
+            self.player = None
         if self.timer is not None:
             self.timer.invalidate()
             self.timer = None
@@ -432,8 +554,8 @@ def main():
         print(f"Warning: no subfolders in {IMAGE_DIR} — create one per collection",
               file=sys.stderr)
     for name in collections:
-        if not find_images(name):
-            print(f"Warning: no images found in {collection_dir(name)}", file=sys.stderr)
+        if not find_media(name):
+            print(f"Warning: no media found in {collection_dir(name)}", file=sys.stderr)
 
     app.run()
 

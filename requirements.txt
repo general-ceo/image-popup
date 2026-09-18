@@ -1,3 +1,5 @@
 pyobjc-core==12.2.2
+pyobjc-framework-AVFoundation==12.2.2
 pyobjc-framework-Cocoa==12.2.2
+pyobjc-framework-CoreMedia==12.2.2
 pyobjc-framework-Quartz==12.2.2

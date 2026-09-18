@@ -47,6 +47,14 @@ def pump(seconds):
         )
 
 
+def scheduled_seconds():
+    """How long the popup is set to stay up.
+
+    NSTimer.timeInterval() reports 0 for non-repeating timers, so read the fire date.
+    """
+    return c.timer.fireDate().timeIntervalSinceNow()
+
+
 def pump_until_dismissed(timeout=4.0):
     """Pump until the popup goes away; returns how long that took, or None."""
     start = time.time()
@@ -71,6 +79,71 @@ def write_png(path, w=120, h=90):
     rep.representationUsingType_properties_(NSPNGFileType, {}).writeToFile_atomically_(
         path, True
     )
+
+
+def write_gif(path, frames=6, delay=0.3, w=100, h=80):
+    """Animated GIF whose one loop lasts frames*delay seconds."""
+    from Quartz import (CGBitmapContextCreate, CGBitmapContextCreateImage,
+                        CGColorSpaceCreateDeviceRGB, CGContextFillRect, CGContextSetRGBFillColor,
+                        CGImageDestinationAddImage, CGImageDestinationCreateWithURL,
+                        CGImageDestinationFinalize, CGImageDestinationSetProperties,
+                        CGRectMake, kCGImageAlphaPremultipliedLast)
+    from Foundation import NSURL as _NSURL
+    dest = CGImageDestinationCreateWithURL(
+        _NSURL.fileURLWithPath_(path), "com.compuserve.gif", frames, None)
+    CGImageDestinationSetProperties(dest, {"{GIF}": {"LoopCount": 0}})
+    for i in range(frames):
+        ctx = CGBitmapContextCreate(None, w, h, 8, 0, CGColorSpaceCreateDeviceRGB(),
+                                    kCGImageAlphaPremultipliedLast)
+        CGContextSetRGBFillColor(ctx, i / max(frames - 1, 1), 0.4, 0.8, 1.0)
+        CGContextFillRect(ctx, CGRectMake(0, 0, w, h))
+        CGImageDestinationAddImage(dest, CGBitmapContextCreateImage(ctx),
+                                   {"{GIF}": {"DelayTime": delay}})
+    CGImageDestinationFinalize(dest)
+
+
+def write_mp4(path, seconds=1.5, w=96, h=64, fps=10):
+    """Short silent H.264 clip."""
+    from AVFoundation import (AVAssetWriter, AVAssetWriterInput,
+                              AVAssetWriterInputPixelBufferAdaptor, AVFileTypeMPEG4,
+                              AVMediaTypeVideo, AVVideoCodecKey, AVVideoCodecTypeH264,
+                              AVVideoHeightKey, AVVideoWidthKey)
+    from CoreMedia import CMTimeMake
+    from Quartz import (CVPixelBufferCreate, CVPixelBufferGetBaseAddress,
+                        CVPixelBufferGetBytesPerRow, CVPixelBufferLockBaseAddress,
+                        CVPixelBufferUnlockBaseAddress, kCVPixelFormatType_32ARGB)
+    from Foundation import NSURL as _NSURL
+
+    writer = AVAssetWriter.alloc().initWithURL_fileType_error_(
+        _NSURL.fileURLWithPath_(path), AVFileTypeMPEG4, None)
+    if isinstance(writer, tuple):
+        writer = writer[0]
+    inp = AVAssetWriterInput.assetWriterInputWithMediaType_outputSettings_(
+        AVMediaTypeVideo,
+        {AVVideoCodecKey: AVVideoCodecTypeH264, AVVideoWidthKey: w, AVVideoHeightKey: h})
+    inp.setExpectsMediaDataInRealTime_(False)
+    adaptor = AVAssetWriterInputPixelBufferAdaptor.assetWriterInputPixelBufferAdaptorWithAssetWriterInput_sourcePixelBufferAttributes_(
+        inp, None)
+    writer.addInput_(inp)
+    writer.startWriting()
+    writer.startSessionAtSourceTime_(CMTimeMake(0, fps))
+    for i in range(int(seconds * fps)):
+        res = CVPixelBufferCreate(None, w, h, kCVPixelFormatType_32ARGB, None, None)
+        pb = res[1] if isinstance(res, tuple) else res
+        CVPixelBufferLockBaseAddress(pb, 0)
+        nbytes = CVPixelBufferGetBytesPerRow(pb) * h
+        CVPixelBufferGetBaseAddress(pb).as_buffer(nbytes)[:] = (
+            bytes((255, 40, (i * 9) % 256, 180)) * (nbytes // 4))
+        CVPixelBufferUnlockBaseAddress(pb, 0)
+        while not inp.isReadyForMoreMediaData():
+            time.sleep(0.01)
+        adaptor.appendPixelBuffer_withPresentationTime_(pb, CMTimeMake(i, fps))
+    inp.markAsFinished()
+    done = []
+    writer.finishWritingWithCompletionHandler_(lambda: done.append(True))
+    start = time.time()
+    while not done and time.time() - start < 20:
+        pump(0.05)
 
 
 def make_collection(name, count):
@@ -147,8 +220,8 @@ check("menu built from discovery",
       titles() == ["Show Random Image", "", "Collection", "aardvark", "Jazz", "Reaction", "",
                    "Random Position", "", "Quit"], str(titles()))
 check("Collection header is a disabled label", not c.menu.itemAtIndex_(2).isEnabled())
-check("item tooltip reports the image count",
-      c.collection_items["Jazz"].toolTip() == "4 images in images/Jazz",
+check("item tooltip reports the file count",
+      c.collection_items["Jazz"].toolTip() == "4 files in images/Jazz",
       c.collection_items["Jazz"].toolTip())
 check("stale saved name falls back to the first collection",
       c.collection == "aardvark", str(c.collection))
@@ -174,8 +247,8 @@ img = w.contentView().subviews()[0].image()
 check("scaled within the %dpt cap" % mf.MAX_EDGE, max(sz.width, sz.height) <= mf.MAX_EDGE,
       f"{sz.width}x{sz.height}")
 check("window matches requested size exactly (no Retina drift)",
-      (sz.width, sz.height) == tuple(c.contentSize(img)),
-      f"{sz.width}x{sz.height} vs {c.contentSize(img)}")
+      (sz.width, sz.height) == tuple(c.contentSize(tuple(img.size()))),
+      f"{sz.width}x{sz.height} vs {c.contentSize(tuple(img.size()))}")
 check("image view fills the window",
       tuple(w.contentView().subviews()[0].frame().size) == (sz.width, sz.height))
 _s = img.size()
@@ -203,20 +276,20 @@ check("dismissed once after rapid clicks", pump_until_dismissed() is not None)
 
 seen, repeats, prev = set(), 0, c.last_image
 for _ in range(60):
-    c.pickImage()
+    c.pickMedia()
     if c.last_image == prev:
         repeats += 1
     prev = c.last_image
     seen.add(os.path.basename(c.last_image))
 check("all images in the collection reachable",
-      len(seen) == len(mf.find_images("Jazz")), f"{len(seen)}/{len(mf.find_images('Jazz'))}")
+      len(seen) == len(mf.find_media("Jazz")), f"{len(seen)}/{len(mf.find_media('Jazz'))}")
 check("never repeats back-to-back", repeats == 0, f"{repeats} repeats")
 
 # --- collection selection -----------------------------------------------------
 
 jazz, reaction = c.collection_items["Jazz"], c.collection_items["Reaction"]
-jazz_files = {os.path.basename(p) for p in mf.find_images("Jazz")}
-reaction_files = {os.path.basename(p) for p in mf.find_images("Reaction")}
+jazz_files = {os.path.basename(p) for p in mf.find_media("Jazz")}
+reaction_files = {os.path.basename(p) for p in mf.find_media("Reaction")}
 check("only the active collection is checked",
       (jazz.state(), reaction.state()) == (NSControlStateValueOn, NSControlStateValueOff))
 check("Jazz active -> only Jazz images", shown_over(25) == jazz_files)
@@ -250,7 +323,7 @@ check("checkmark survives a rebuild",
       c.collection_items["Reaction"].state() == NSControlStateValueOn)
 check("added folder's images are usable",
       (c.selectCollection_(c.collection_items["Cats"]), shown_over(20))[1]
-      == {os.path.basename(p) for p in mf.find_images("Cats")})
+      == {os.path.basename(p) for p in mf.find_media("Cats")})
 
 shutil.rmtree(os.path.join(mf.IMAGE_DIR, "Cats"))
 c.menuWillOpen_(c.menu)
@@ -260,7 +333,7 @@ check("deleting the active folder falls back to the first",
 check("fallback is persisted", _defaults.stringForKey_(mf.COLLECTION_KEY) == "aardvark")
 c.showImage_(None)
 check("still works after the fallback",
-      os.path.basename(c.last_image) in {os.path.basename(p) for p in mf.find_images("aardvark")})
+      os.path.basename(c.last_image) in {os.path.basename(p) for p in mf.find_media("aardvark")})
 c.dismissWindow()
 
 # --- empty states -------------------------------------------------------------
@@ -271,10 +344,10 @@ c.selectCollection_(c.collection_items["Empty"])
 check("empty folder is still selectable", c.collection == "Empty")
 c.showImage_(None)
 check("empty collection shows a named placeholder",
-      "No images in Empty" in c.window.contentView().subviews()[0].stringValue())
+      "Nothing in Empty" in c.window.contentView().subviews()[0].stringValue())
 check("placeholder auto-dismisses", pump_until_dismissed() is not None)
-check("empty folder tooltip says 0 images",
-      c.collection_items["Empty"].toolTip() == "0 images in images/Empty")
+check("empty folder tooltip says 0 files",
+      c.collection_items["Empty"].toolTip() == "0 files in images/Empty")
 
 for name in mf.find_collections():
     shutil.rmtree(os.path.join(mf.IMAGE_DIR, name))
@@ -286,7 +359,7 @@ check("no folders -> that row is disabled", not c.menu.itemAtIndex_(3).isEnabled
 check("no folders -> Show Random Image is disabled", not c.menu.itemAtIndex_(0).isEnabled())
 c.showImage_(None)
 check("no folders -> guidance placeholder",
-      "No image folders yet" in c.window.contentView().subviews()[0].stringValue())
+      "No folders yet" in c.window.contentView().subviews()[0].stringValue())
 check("guidance placeholder dismisses", pump_until_dismissed() is not None)
 
 make_collection("Later", 2)
@@ -296,6 +369,102 @@ check("Show Random Image re-enabled", c.menu.itemAtIndex_(0).isEnabled())
 c.showImage_(None)
 check("shows images again", c.window.contentView().subviews()[0].image() is not None)
 c.dismissWindow()
+
+# --- animated GIFs and videos -------------------------------------------------
+
+GIF_LOOP, VIDEO_SECS = 1.8, 1.5  # both differ from DISPLAY_SECONDS on purpose
+os.makedirs(os.path.join(mf.IMAGE_DIR, "Gif"))
+write_gif(os.path.join(mf.IMAGE_DIR, "Gif", "spin.gif"), frames=6, delay=0.3)
+os.makedirs(os.path.join(mf.IMAGE_DIR, "Video"))
+write_mp4(os.path.join(mf.IMAGE_DIR, "Video", "clip.mp4"), seconds=VIDEO_SECS)
+os.makedirs(os.path.join(mf.IMAGE_DIR, "Broken"))
+with open(os.path.join(mf.IMAGE_DIR, "Broken", "not-really.mp4"), "w") as fh:
+    fh.write("this is not a video")
+os.makedirs(os.path.join(mf.IMAGE_DIR, "Still"))
+write_png(os.path.join(mf.IMAGE_DIR, "Still", "flat.png"))
+c.menuWillOpen_(c.menu)
+
+gif_path = os.path.join(mf.IMAGE_DIR, "Gif", "spin.gif")
+mp4_path = os.path.join(mf.IMAGE_DIR, "Video", "clip.mp4")
+check("videos are collected alongside images", mf.find_media("Video") == [mp4_path])
+check("is_video recognizes mp4/mov/m4v",
+      all(mf.is_video("x" + e) for e in (".mp4", ".MP4", ".mov", ".m4v"))
+      and not mf.is_video("x.png"))
+check("GIF loop duration read from the file",
+      abs(mf.gif_loop_duration(__import__("AppKit").NSImage.alloc().initWithContentsOfFile_(gif_path))
+          - GIF_LOOP) < 0.05)
+check("static images report no loop duration",
+      mf.gif_loop_duration(__import__("AppKit").NSImage.alloc().initWithContentsOfFile_(
+          os.path.join(mf.IMAGE_DIR, "Still", "flat.png"))) is None)
+_dur, _size = mf.video_info(mp4_path)
+check("video duration read from the file", abs(_dur - VIDEO_SECS) < 0.1, f"{_dur:.2f}s")
+check("video natural size read from the file", tuple(_size) == (96.0, 64.0), str(tuple(_size)))
+check("unreadable video reports no info", mf.video_info(
+    os.path.join(mf.IMAGE_DIR, "Broken", "not-really.mp4")) is None)
+
+c.selectCollection_(c.collection_items["Still"])
+c.showImage_(None)
+check("static image uses DISPLAY_SECONDS",
+      abs(scheduled_seconds() - mf.DISPLAY_SECONDS) < 0.05, f"{scheduled_seconds():.2f}s")
+check("static image has no player", c.player is None)
+c.dismissWindow()
+
+c.selectCollection_(c.collection_items["Gif"])
+c.showImage_(None)
+check("GIF stays up for exactly one loop",
+      abs(scheduled_seconds() - GIF_LOOP) < 0.1, f"{scheduled_seconds():.2f}s")
+_iv = c.window.contentView().subviews()[0]
+check("GIF is animating", _iv.animates())
+check("GIF window sized from the GIF", tuple(c.window.frame().size) == tuple(c.contentSize((100, 80))))
+_gif_elapsed = pump_until_dismissed(timeout=5.0)
+check("GIF dismisses after its loop, not after DISPLAY_SECONDS",
+      _gif_elapsed is not None and abs(_gif_elapsed - GIF_LOOP) < 0.35,
+      f"{_gif_elapsed:.2f}s vs loop {GIF_LOOP}s")
+
+c.selectCollection_(c.collection_items["Video"])
+c.showImage_(None)
+check("video creates a player", c.player is not None)
+check("video is playing", c.player.rate() > 0)
+check("player layer attached to the popup",
+      any(l.__class__.__name__.endswith("AVPlayerLayer")
+          for l in (c.window.contentView().layer().sublayers() or [])))
+check("video window sized from the video",
+      tuple(c.window.frame().size) == tuple(c.contentSize((96, 64))), str(tuple(c.window.frame().size)))
+check("backstop timer covers the clip length",
+      abs(scheduled_seconds() - VIDEO_SECS) < 0.2, f"{scheduled_seconds():.2f}s")
+check("audio follows MUTE_VIDEO", c.player.isMuted() == mf.MUTE_VIDEO)
+_video_elapsed = pump_until_dismissed(timeout=6.0)
+check("video dismisses when it ends",
+      _video_elapsed is not None and abs(_video_elapsed - VIDEO_SECS) < 0.4,
+      f"{_video_elapsed:.2f}s vs clip {VIDEO_SECS}s")
+check("player released on dismiss", c.player is None)
+
+c.showImage_(None)
+_playing = c.player
+c.showImage_(None)
+check("re-click stops the previous video", _playing.rate() == 0 and c.player is not _playing)
+c.dismissWindow()
+check("player cleaned up after manual dismiss", c.player is None)
+
+c.selectCollection_(c.collection_items["Broken"])
+c.showImage_(None)
+check("corrupt video falls back to the placeholder",
+      c.window.contentView().subviews()[0].__class__.__name__.endswith("NSTextField"))
+check("corrupt video does not start a player", c.player is None)
+check("corrupt video still dismisses", pump_until_dismissed() is not None)
+
+os.makedirs(os.path.join(mf.IMAGE_DIR, "Long"))
+write_gif(os.path.join(mf.IMAGE_DIR, "Long", "long.gif"), frames=60, delay=0.6)  # 36s
+c.menuWillOpen_(c.menu)
+c.selectCollection_(c.collection_items["Long"])
+c.showImage_(None)
+check("over-long media is capped at MAX_MEDIA_SECONDS",
+      abs(scheduled_seconds() - mf.MAX_MEDIA_SECONDS) < 0.1, f"{scheduled_seconds():.1f}s")
+c.dismissWindow()
+
+for _name in ("Gif", "Video", "Broken", "Still", "Long"):
+    shutil.rmtree(os.path.join(mf.IMAGE_DIR, _name))
+c.menuWillOpen_(c.menu)
 
 # --- random position ----------------------------------------------------------
 
