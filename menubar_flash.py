@@ -51,8 +51,21 @@ CORNER_RADIUS = 14.0
 SCREEN_MARGIN = 5.0  # keep random placements this far from the screen edges
 RANDOM_POSITION_KEY = "RandomPosition"  # NSUserDefaults key, so the toggle survives a restart
 COLLECTION_KEY = "Collection"
-COLLECTIONS = ("Jazz", "Reaction")  # subfolders of images/; first one is the default
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".tiff", ".tif", ".bmp", ".heic", ".webp"}
+
+
+def find_collections():
+    """Every subfolder of images/, in menu order. Each one is a collection."""
+    if not os.path.isdir(IMAGE_DIR):
+        return []
+    return sorted(
+        (
+            name
+            for name in os.listdir(IMAGE_DIR)
+            if not name.startswith(".") and os.path.isdir(os.path.join(IMAGE_DIR, name))
+        ),
+        key=str.lower,
+    )
 
 
 def collection_dir(collection):
@@ -92,9 +105,9 @@ class FlashController(NSObject):
         self.last_image = None
         defaults = NSUserDefaults.standardUserDefaults()
         self.random_position = defaults.boolForKey_(RANDOM_POSITION_KEY)
-        saved = defaults.stringForKey_(COLLECTION_KEY)
-        # Ignore a stale saved name if COLLECTIONS has changed since it was written.
-        self.collection = saved if saved in COLLECTIONS else COLLECTIONS[0]
+        self.collection = defaults.stringForKey_(COLLECTION_KEY)
+        self.collection_items = {}
+        self.refreshCollections()  # validates the saved name against the folders on disk
         return self
 
     # --- menu bar setup ---
@@ -119,10 +132,22 @@ class FlashController(NSObject):
         button.setToolTip_("Click for a random image \u2014 right-click for options")
 
         self.menu = NSMenu.alloc().init()
+        self.menu.setAutoenablesItems_(False)  # we manage the header's disabled look
+        self.menu.setDelegate_(self)  # menuWillOpen_ re-reads images/ before each open
+        self.rebuildMenu()
+
+    # --- menu construction ---
+
+    @objc.python_method
+    def rebuildMenu(self):
+        """Build the menu from whatever subfolders images/ has right now."""
+        self.menu.removeAllItems()
+
         show = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             "Show Random Image", "showImage:", ""
         )
         show.setTarget_(self)
+        show.setEnabled_(self.collection is not None)
         self.menu.addItem_(show)
         self.menu.addItem_(NSMenuItem.separatorItem())
 
@@ -131,14 +156,26 @@ class FlashController(NSObject):
         self.menu.addItem_(header)
 
         self.collection_items = {}
-        for name in COLLECTIONS:
-            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-                name, "selectCollection:", ""
+        collections = find_collections()
+        if not collections:
+            empty = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                "No folders in images/", None, ""
             )
-            item.setTarget_(self)
-            item.setToolTip_("Show images from images/%s" % name)
-            self.menu.addItem_(item)
-            self.collection_items[name] = item
+            empty.setEnabled_(False)
+            empty.setToolTip_("Create a folder inside images/ and put pictures in it")
+            self.menu.addItem_(empty)
+        else:
+            for name in collections:
+                item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                    name, "selectCollection:", ""
+                )
+                item.setTarget_(self)
+                count = len(find_images(name))
+                item.setToolTip_(
+                    "%d image%s in images/%s" % (count, "" if count == 1 else "s", name)
+                )
+                self.menu.addItem_(item)
+                self.collection_items[name] = item
         self.syncCollectionItems()
 
         self.menu.addItem_(NSMenuItem.separatorItem())
@@ -159,6 +196,24 @@ class FlashController(NSObject):
         )
         quit_item.setTarget_(self)
         self.menu.addItem_(quit_item)
+
+    def menuWillOpen_(self, menu):
+        """NSMenuDelegate: pick up folders added or removed since the last open."""
+        self.refreshCollections()
+        self.rebuildMenu()
+
+    @objc.python_method
+    def refreshCollections(self):
+        """Keep self.collection pointing at a folder that actually exists."""
+        collections = find_collections()
+        if self.collection in collections:
+            return
+        self.collection = collections[0] if collections else None
+        self.last_image = None
+        if self.collection is not None:
+            NSUserDefaults.standardUserDefaults().setObject_forKey_(
+                self.collection, COLLECTION_KEY
+            )
 
     # --- click handling ---
 
@@ -190,13 +245,15 @@ class FlashController(NSObject):
 
     @objc.python_method
     def syncCollectionItems(self):
-        """Check exactly the active collection, so the pair reads as a radio group."""
+        """Check exactly the active collection, so the list reads as a radio group."""
         for name, item in self.collection_items.items():
             item.setState_(
                 NSControlStateValueOn if name == self.collection else NSControlStateValueOff
             )
         self.status_item.button().setToolTip_(
             "Click for a random %s image \u2014 right-click for options" % self.collection
+            if self.collection
+            else "Add a folder of images to images/ \u2014 right-click for options"
         )
 
     def toggleRandomPosition_(self, sender):
@@ -230,6 +287,9 @@ class FlashController(NSObject):
     @objc.python_method
     def pickImage(self):
         """Random image from the active collection, avoiding an immediate repeat."""
+        self.refreshCollections()  # a folder may have appeared or vanished since last time
+        if self.collection is None:
+            return None
         images = find_images(self.collection)
         if not images:
             return None
@@ -332,6 +392,8 @@ class FlashController(NSObject):
         )
         label.setStringValue_(
             "No images in %s.\nAdd some to images/%s/." % (self.collection, self.collection)
+            if self.collection
+            else "No image folders yet.\nCreate one inside images/ and add pictures."
         )
         label.setAlignment_(NSCenterTextAlignment)
         label.setFont_(NSFont.systemFontOfSize_(13))
@@ -365,7 +427,11 @@ def main():
     _controller = FlashController.alloc().init()  # module-level: keeps it alive for the app's lifetime
     _controller.setUpStatusItem()
 
-    for name in COLLECTIONS:
+    collections = find_collections()
+    if not collections:
+        print(f"Warning: no subfolders in {IMAGE_DIR} — create one per collection",
+              file=sys.stderr)
+    for name in collections:
         if not find_images(name):
             print(f"Warning: no images found in {collection_dir(name)}", file=sys.stderr)
 
