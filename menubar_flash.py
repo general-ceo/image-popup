@@ -64,10 +64,11 @@ CORNER_RADIUS = 14.0
 SCREEN_MARGIN = 5.0  # keep random placements this far from the screen edges
 RANDOM_POSITION_KEY = "RandomPosition"  # NSUserDefaults key, so the toggle survives a restart
 COLLECTION_KEY = "Collection"
+INCLUDE_AUDIO_KEY = "IncludeVideoAudio"
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".tiff", ".tif", ".bmp", ".heic", ".webp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v"}
 MEDIA_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
-MUTE_VIDEO = False  # videos play with sound; set True to silence them
+INCLUDE_AUDIO_DEFAULT = True  # first-run value for the "Include Video Audio" toggle
 MAX_MEDIA_SECONDS = 30.0  # safety cap, so one long clip can't hold the screen
 PLACEHOLDER_SIZE = (340.0, 120.0)
 MIN_GIF_FRAME_DELAY = 0.1  # GIFs asking for ~0s per frame are shown at this rate
@@ -171,6 +172,11 @@ class FlashController(NSObject):
         self.last_image = None
         defaults = NSUserDefaults.standardUserDefaults()
         self.random_position = defaults.boolForKey_(RANDOM_POSITION_KEY)
+        self.include_audio = (
+            defaults.boolForKey_(INCLUDE_AUDIO_KEY)
+            if defaults.objectForKey_(INCLUDE_AUDIO_KEY) is not None
+            else INCLUDE_AUDIO_DEFAULT
+        )
         self.collection = defaults.stringForKey_(COLLECTION_KEY)
         self.collection_items = {}
         self.refreshCollections()  # validates the saved name against the folders on disk
@@ -256,6 +262,14 @@ class FlashController(NSObject):
         self.syncRandomItem()
         self.menu.addItem_(self.random_item)
 
+        self.audio_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Include Video Audio", "toggleIncludeAudio:", ""
+        )
+        self.audio_item.setTarget_(self)
+        self.audio_item.setToolTip_("Play sound with videos")
+        self.syncAudioItem()
+        self.menu.addItem_(self.audio_item)
+
         self.menu.addItem_(NSMenuItem.separatorItem())
         quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             "Quit", "quit:", "q"
@@ -333,6 +347,21 @@ class FlashController(NSObject):
     def syncRandomItem(self):
         self.random_item.setState_(
             NSControlStateValueOn if self.random_position else NSControlStateValueOff
+        )
+
+    def toggleIncludeAudio_(self, sender):
+        self.include_audio = not self.include_audio
+        self.syncAudioItem()
+        NSUserDefaults.standardUserDefaults().setBool_forKey_(
+            self.include_audio, INCLUDE_AUDIO_KEY
+        )
+        if self.player is not None:  # apply to a clip that's playing right now
+            self.player.setMuted_(not self.include_audio)
+
+    @objc.python_method
+    def syncAudioItem(self):
+        self.audio_item.setState_(
+            NSControlStateValueOn if self.include_audio else NSControlStateValueOff
         )
 
     def quit_(self, sender):
@@ -437,7 +466,7 @@ class FlashController(NSObject):
     def attachPlayer(self, container, path, width, height):
         """Start a video playing inside the popup, dismissing when it ends."""
         self.player = AVPlayer.playerWithURL_(NSURL.fileURLWithPath_(path))
-        self.player.setMuted_(MUTE_VIDEO)
+        self.player.setMuted_(not self.include_audio)
 
         layer = AVPlayerLayer.playerLayerWithPlayer_(self.player)
         layer.setFrame_(NSMakeRect(0, 0, width, height))

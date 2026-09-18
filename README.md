@@ -76,6 +76,7 @@ Collection
   Memes
 ─────────────────
   Random Position
+✓ Include Video Audio
 ─────────────────
 Quit
 ```
@@ -102,7 +103,8 @@ Quit
 - **Right-click** (or control-click) — the options menu.
 
 Exactly one collection is checked at a time, and only its images are ever shown.
-Your choice is saved, so it's still active after a restart.
+Your choice is saved, so it's still active after a restart — as are *Random Position*
+and *Include Video Audio*.
 
 Within a collection the same image never appears twice in a row (when there's more
 than one to choose from). Switching collections resets that.
@@ -127,14 +129,22 @@ cut off at one second. Frames that ask for ~0 delay are shown at
 
 **Videos** play from start to finish and the popup closes on the last frame. Portrait
 clips from a phone are sized using the file's rotation metadata, so they aren't shown
-sideways. Videos play **with sound** — set `MUTE_VIDEO = True` in `menubar_flash.py`
-to silence them.
+sideways. Videos play with sound by default; see *Include Video Audio* below.
 
 Anything longer than `MAX_MEDIA_SECONDS` (30s) is cut off there, so one long clip
 can't hold the screen. A file that can't be decoded shows a placeholder instead of
 failing silently.
 
 Clicking the icon during playback stops the current clip and starts a new one.
+
+## Include Video Audio
+
+A checkbox in the menu, on by default. Uncheck it to play videos silently — useful
+when you want clips to flash past without interrupting whatever you're listening to.
+
+Toggling it takes effect immediately, even mid-clip: a video that's playing right now
+goes quiet the moment you uncheck it. The setting is saved and survives a restart,
+and it has no effect on GIFs or still images, which have no audio to begin with.
 
 ## Popup behavior
 
@@ -160,7 +170,7 @@ Constants at the top of `menubar_flash.py`:
 | `CORNER_RADIUS` | `14.0` | Popup corner rounding |
 | `SCREEN_MARGIN` | `5.0` | Minimum gap from screen edges in random mode |
 | `MAX_MEDIA_SECONDS` | `30.0` | Hard cap on GIF loops and video length |
-| `MUTE_VIDEO` | `False` | Set `True` to play videos silently |
+| `INCLUDE_AUDIO_DEFAULT` | `True` | First-run value of *Include Video Audio* |
 | `MIN_GIF_FRAME_DELAY` | `0.1` | Rate used for GIF frames with ~0 delay |
 | `IMAGE_DIR` | `images/` | Where collection folders are read from |
 
@@ -183,12 +193,12 @@ out of it.
 ./.venv/bin/python test_menubar_flash.py
 ```
 
-97 checks, run against a temporary `images/` folder — they don't touch your files, and
+112 checks, run against a temporary `images/` folder — they don't touch your files, and
 they save and restore your menu settings. The suite generates its own animated GIF and
 H.264 clip on the fly, so it needs no fixtures checked into the repo.
 
 Covers folder auto-detection (sorting, hidden folders, loose files, adding and deleting
 folders while running), collection switching and isolation, per-format timing (still vs.
 GIF loop vs. video length), video playback and teardown, the duration cap, corrupt-file
-fallback, click handling, rapid re-clicks, randomness, window geometry, the Random
-Position toggle, and every empty state.
+fallback, click handling, rapid re-clicks, randomness, window geometry, both toggles
+(including muting a clip mid-playback), and every empty state.

@@ -191,12 +191,17 @@ _saved = (
     _defaults.boolForKey_(mf.RANDOM_POSITION_KEY),
     _defaults.stringForKey_(mf.COLLECTION_KEY),
 )
+_saved_audio = _defaults.objectForKey_(mf.INCLUDE_AUDIO_KEY)
 
 
 def restore_defaults():
     _defaults.setBool_forKey_(_saved[0], mf.RANDOM_POSITION_KEY)
     if _saved[1] is not None:
         _defaults.setObject_forKey_(_saved[1], mf.COLLECTION_KEY)
+    if _saved_audio is None:
+        _defaults.removeObjectForKey_(mf.INCLUDE_AUDIO_KEY)
+    else:
+        _defaults.setObject_forKey_(_saved_audio, mf.INCLUDE_AUDIO_KEY)
     shutil.rmtree(TMP, ignore_errors=True)
     mf.IMAGE_DIR = REAL_IMAGE_DIR
 
@@ -218,7 +223,7 @@ check("hidden folders ignored", ".hidden" not in mf.find_collections())
 check("loose files are not collections", "loose.png" not in mf.find_collections())
 check("menu built from discovery",
       titles() == ["Show Random Image", "", "Collection", "aardvark", "Jazz", "Reaction", "",
-                   "Random Position", "", "Quit"], str(titles()))
+                   "Random Position", "Include Video Audio", "", "Quit"], str(titles()))
 check("Collection header is a disabled label", not c.menu.itemAtIndex_(2).isEnabled())
 check("item tooltip reports the file count",
       c.collection_items["Jazz"].toolTip() == "4 files in images/Jazz",
@@ -432,7 +437,7 @@ check("video window sized from the video",
       tuple(c.window.frame().size) == tuple(c.contentSize((96, 64))), str(tuple(c.window.frame().size)))
 check("backstop timer covers the clip length",
       abs(scheduled_seconds() - VIDEO_SECS) < 0.2, f"{scheduled_seconds():.2f}s")
-check("audio follows MUTE_VIDEO", c.player.isMuted() == mf.MUTE_VIDEO)
+check("audio follows the toggle", c.player.isMuted() is not c.include_audio)
 _video_elapsed = pump_until_dismissed(timeout=6.0)
 check("video dismisses when it ends",
       _video_elapsed is not None and abs(_video_elapsed - VIDEO_SECS) < 0.4,
@@ -452,6 +457,47 @@ check("corrupt video falls back to the placeholder",
       c.window.contentView().subviews()[0].__class__.__name__.endswith("NSTextField"))
 check("corrupt video does not start a player", c.player is None)
 check("corrupt video still dismisses", pump_until_dismissed() is not None)
+
+# --- include video audio toggle ---
+
+_defaults.removeObjectForKey_(mf.INCLUDE_AUDIO_KEY)
+_fresh = mf.FlashController.alloc().init()
+check("defaults to INCLUDE_AUDIO_DEFAULT on first run",
+      _fresh.include_audio == mf.INCLUDE_AUDIO_DEFAULT)
+_defaults.setBool_forKey_(False, mf.INCLUDE_AUDIO_KEY)
+check("an explicit off is remembered, not mistaken for unset",
+      mf.FlashController.alloc().init().include_audio is False)
+_defaults.setBool_forKey_(True, mf.INCLUDE_AUDIO_KEY)
+c.include_audio = True
+c.syncAudioItem()
+
+c.selectCollection_(c.collection_items["Video"])
+check("checked when audio is on", c.audio_item.state() == NSControlStateValueOn)
+c.showImage_(None)
+check("audio on -> player unmuted", c.player.isMuted() is False)
+c.dismissWindow()
+
+c.toggleIncludeAudio_(None)
+check("toggle turns audio off", c.include_audio is False)
+check("checkmark clears", c.audio_item.state() == NSControlStateValueOff)
+check("choice persisted", _defaults.boolForKey_(mf.INCLUDE_AUDIO_KEY) is False)
+c.showImage_(None)
+check("audio off -> player muted", c.player.isMuted() is True)
+
+c.toggleIncludeAudio_(None)
+check("toggling mid-playback unmutes the running clip", c.player.isMuted() is False)
+c.toggleIncludeAudio_(None)
+check("toggling mid-playback mutes the running clip", c.player.isMuted() is True)
+check("mid-playback toggle does not disturb the clip", c.player.rate() > 0)
+check("clip still ends on its own", pump_until_dismissed(timeout=6.0) is not None)
+
+check("toggle survives a menu rebuild",
+      (c.menuWillOpen_(c.menu), c.audio_item.state())[1] == NSControlStateValueOff)
+c.toggleIncludeAudio_(None)
+check("restored to on", c.include_audio is True and c.audio_item.state() == NSControlStateValueOn)
+check("audio setting is independent of Random Position",
+      (c.toggleRandomPosition_(None), c.include_audio)[1] is True)
+c.toggleRandomPosition_(None)
 
 os.makedirs(os.path.join(mf.IMAGE_DIR, "Long"))
 write_gif(os.path.join(mf.IMAGE_DIR, "Long", "long.gif"), frames=60, delay=0.6)  # 36s
