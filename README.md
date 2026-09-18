@@ -21,6 +21,27 @@ folders, so your first stop is adding some images — see below.
 
 **Requires macOS** (it's built on AppKit and AVFoundation) and Python 3.8+.
 
+Running `./run.sh` a second time is harmless: it notices the first copy and exits, so
+you never end up with two icons.
+
+### Running without keeping a terminal open
+
+```bash
+./run.sh --background   # detach; close the terminal and the icon stays
+./run.sh --stop         # quit it again (or use Quit in the menu)
+```
+
+Started normally the app is a child of your shell, so closing the terminal window
+kills it. `--background` detaches it so it keeps running on its own.
+
+You'd do that once per login. Making it start **automatically** at login needs a
+LaunchAgent or Login Item, and that only works if this folder lives **outside**
+Desktop, Documents, and Downloads: macOS blocks anything it launches on your behalf
+from reading those three folders until you grant permission, and that applies to
+LaunchAgents, Login Items, and app bundles alike. Starting from a terminal is exempt,
+because your terminal already holds that permission. Move the project to somewhere
+like `~/Projects/image-popup` and a LaunchAgent becomes straightforward.
+
 ## Adding your own image folders
 
 Every subfolder of `images/` automatically becomes a collection in the menu. That's
